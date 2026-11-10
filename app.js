@@ -79,7 +79,7 @@ let S = load(STORE, null) || {
   match: null,
   result: null,
 };
-let ui = { sel: null, rolling: [] }; // transient, not persisted
+let ui = { sel: null, rolling: [], dialog: null }; // transient, not persisted
 
 function lastPlayers() { return H.length ? H[H.length - 1].players.slice() : null; }
 
@@ -184,7 +184,7 @@ const actions = {
   games({ d }) { S.setup.games = Math.min(MAX_GAMES, Math.max(1, S.setup.games + +d)); },
   diceMode({ v }) { S.setup.realDice = v === 'real'; },
   start() {
-    if (S.match && !confirm('Discard the match in progress and start a new one?')) return false;
+    if (S.match) return ask('Discard the match in progress and start a new one?', 'Discard & start', startMatch, true);
     startMatch();
   },
   resume() { S.view = 'game'; keepAwake(); },
@@ -198,8 +198,7 @@ const actions = {
     const msg = done
       ? `End the match now? The ${done} finished game${done > 1 ? 's' : ''} will be saved to your stats.`
       : 'End the match now? Nothing has been finished yet, so it will be discarded.';
-    if (!confirm(msg)) return false;
-    finishMatch(done > 0);
+    ask(msg, 'End match', () => finishMatch(done > 0), !done);
   },
 
   // turn
@@ -281,10 +280,16 @@ const actions = {
     startMatch();
   },
   clearHistory() {
-    if (!confirm('Delete all saved matches and stats? This cannot be undone.')) return false;
-    H = [];
+    ask('Delete all saved matches and stats? This cannot be undone.', 'Delete stats', () => { H = []; }, true);
   },
+
+  // confirmation dialog
+  dialogYes() { const d = ui.dialog; ui.dialog = null; if (d) d.fn(); },
+  dialogNo() { ui.dialog = null; },
 };
+
+// In-page confirmation (native confirm() is unavailable in some embedded views).
+function ask(text, yes, fn, danger = false) { ui.dialog = { text, yes, fn, danger }; }
 
 function finishMatch(keep) {
   const m = S.match;
@@ -609,7 +614,16 @@ function render() {
   if (S.view === 'result' && !S.result) S.view = 'setup';
   const app = document.getElementById('app');
   const prevView = app.dataset.view;
-  app.innerHTML = VIEWS[S.view]();
+  const d = ui.dialog;
+  app.innerHTML = VIEWS[S.view]() + (d ? `
+    <div class="scrim" data-a="dialogNo"></div>
+    <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dlg-text">
+      <p id="dlg-text">${esc(d.text)}</p>
+      <div class="actions">
+        <button class="btn" data-a="dialogNo">Cancel</button>
+        <button class="btn ${d.danger ? 'danger-solid' : 'primary'}" data-a="dialogYes">${esc(d.yes)}</button>
+      </div>
+    </div>` : '');
   app.dataset.view = S.view;
   if (prevView !== S.view) window.scrollTo(0, 0);
   ui.rolling = [];
