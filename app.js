@@ -64,29 +64,42 @@ const HIST = 'kniffle.history.v1';
 function load(key, fallback) {
   try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
 }
-function save() {
+function saveLocal() {
   try {
     localStorage.setItem(STORE, JSON.stringify(S));
     localStorage.setItem(HIST, JSON.stringify(H));
   } catch { /* storage full or disabled: keep playing in memory */ }
+}
+function save() {
+  S.savedAt = Date.now();
+  saveLocal();
+  scheduleCloud();
 }
 
 let H = load(HIST, []); // finished match summaries
 let S = load(STORE, null) || {
   view: 'setup',
   back: null,
-  setup: { players: lastPlayers() || ['Player 1', 'Player 2'], games: 3, realDice: false },
+  setup: { players: lastPlayers() || ['Player 1', 'Player 2'], games: 3, mode: 'virtual' },
   match: null,
   result: null,
 };
 let ui = { sel: null, rolling: [], dialog: null }; // transient, not persisted
+
+// Input modes: 'virtual' (roll in app), 'real' (tap in real dice), 'score' (type points per turn).
+function migrate() {
+  for (const o of [S.setup, S.match]) {
+    if (o && !o.mode) { o.mode = o.realDice ? 'real' : 'virtual'; delete o.realDice; }
+  }
+}
+migrate();
 
 function lastPlayers() { return H.length ? H[H.length - 1].players.slice() : null; }
 
 const curGame = () => S.match.games[S.match.games.length - 1];
 
 function freshTurn(m) {
-  m.dice = m.realDice ? [0, 0, 0, 0, 0] : [1, 1, 1, 1, 1];
+  m.dice = m.mode === 'real' ? [0, 0, 0, 0, 0] : [1, 1, 1, 1, 1];
   m.held = [false, false, false, false, false];
   m.rolls = 0;
 }
@@ -105,7 +118,7 @@ function startMatch() {
     started: Date.now(),
     players,
     totalGames: S.setup.games,
-    realDice: S.setup.realDice,
+    mode: S.setup.mode,
     games: [],
     undo: null,
   };
@@ -182,7 +195,7 @@ const actions = {
   addPlayer() { if (S.setup.players.length < MAX_PLAYERS) S.setup.players.push(`Player ${S.setup.players.length + 1}`); },
   removePlayer({ i }) { if (S.setup.players.length > 1) S.setup.players.splice(+i, 1); },
   games({ d }) { S.setup.games = Math.min(MAX_GAMES, Math.max(1, S.setup.games + +d)); },
-  diceMode({ v }) { S.setup.realDice = v === 'real'; },
+  diceMode({ v }) { S.setup.mode = v; },
   start() {
     if (S.match) return ask('Discard the match in progress and start a new one?', 'Discard & start', startMatch, true);
     startMatch();
@@ -204,7 +217,7 @@ const actions = {
   // turn
   roll() {
     const m = S.match;
-    if (m.realDice || m.rolls >= 3) return false;
+    if (m.mode !== 'virtual' || m.rolls >= 3) return false;
     ui.rolling = [];
     m.dice = m.dice.map((v, i) => {
       if (m.rolls > 0 && m.held[i]) return v;
@@ -218,7 +231,7 @@ const actions = {
   },
   die({ i }) {
     const m = S.match;
-    if (m.realDice) { m.dice[+i] = 0; ui.sel = null; return; }
+    if (m.mode === 'real') { m.dice[+i] = 0; ui.sel = null; return; }
     if (m.rolls === 0 || m.rolls >= 3) return false;
     m.held[+i] = !m.held[+i];
   },
@@ -233,29 +246,13 @@ const actions = {
   pick({ cat }) { ui.sel = ui.sel === cat ? null : cat; },
   score() {
     const m = S.match;
-    if (!ui.sel || !diceReady(m)) return false;
-    const g = curGame();
-    const sc = g.scores[m.cur];
-    if (filled(sc, ui.sel)) return false;
-    m.undo = JSON.stringify({ ...m, undo: null });
-    const pts = scoreFor(ui.sel, m.dice);
-    sc[ui.sel] = pts;
-    if (isKniffel(m.dice)) g.kniffels[m.cur]++;
-    ui.sel = null;
-    buzz(10);
-    if (g.scores.every((s) => totals(s).done)) {
-      const ts = g.scores.map(totals);
-      g.result = {
-        totals: ts.map((t) => t.total),
-        up: ts.map((t) => t.up),
-        bonus: ts.map((t) => t.bonus > 0),
-        kniffels: g.kniffels.slice(),
-      };
-      S.view = 'gameover';
-    } else {
-      m.cur = (m.cur + 1) % m.players.length;
-      freshTurn(m);
-    }
+    if (!ui.sel || !diceReady(m) || m.mode === 'score') return false;
+    return commit(ui.sel, scoreFor(ui.sel, m.dice), isKniffel(m.dice));
+  },
+  enter({ v }) {
+    const pts = +v;
+    if (!ui.sel || !scoreOptions(ui.sel).includes(pts)) return false;
+    return commit(ui.sel, pts, ui.sel === 'kniffel' && pts === 50);
   },
   undo() {
     const m = S.match;
@@ -291,11 +288,47 @@ const actions = {
 // In-page confirmation (native confirm() is unavailable in some embedded views).
 function ask(text, yes, fn, danger = false) { ui.dialog = { text, yes, fn, danger }; }
 
+
+function commit(cat, pts, kniffelRolled) {
+  const m = S.match, g = curGame();
+  const sc = g.scores[m.cur];
+  if (filled(sc, cat)) return false;
+  m.undo = JSON.stringify({ ...m, undo: null });
+  sc[cat] = pts;
+  if (kniffelRolled) g.kniffels[m.cur]++;
+  ui.sel = null;
+  buzz(10);
+  if (g.scores.every((s) => totals(s).done)) {
+    const ts = g.scores.map(totals);
+    g.result = {
+      totals: ts.map((t) => t.total),
+      up: ts.map((t) => t.up),
+      bonus: ts.map((t) => t.bonus > 0),
+      kniffels: g.kniffels.slice(),
+    };
+    S.view = 'gameover';
+  } else {
+    m.cur = (m.cur + 1) % m.players.length;
+    freshTurn(m);
+  }
+}
+
+// Every value a field can legally hold, for score-entry mode.
+function scoreOptions(cat) {
+  const def = CATS.find((c) => c.id === cat);
+  if (def.face) return [0, 1, 2, 3, 4, 5].map((k) => k * def.face);
+  const fixed = { full: 25, small: 30, large: 40, kniffel: 50 }[cat];
+  if (fixed) return [0, fixed];
+  const opts = cat === 'chance' ? [] : [0];
+  for (let v = 5; v <= 30; v++) opts.push(v);
+  return opts;
+}
+
 function finishMatch(keep) {
   const m = S.match;
   S.setup.players = m.players.slice();
   S.setup.games = m.totalGames;
-  S.setup.realDice = m.realDice;
+  S.setup.mode = m.mode;
   if (keep) {
     const sum = summarize(m);
     H.push(sum);
@@ -308,7 +341,7 @@ function finishMatch(keep) {
   releaseAwake();
 }
 
-const diceReady = (m) => (m.realDice ? m.dice.every((v) => v > 0) : m.rolls > 0);
+const diceReady = (m) => (m.mode === 'score' ? true : m.mode === 'real' ? m.dice.every((v) => v > 0) : m.rolls > 0);
 
 /* ---------- Rendering ---------- */
 
@@ -329,6 +362,19 @@ function header(title, sub, left = '', right = '') {
 
 function die(v, attrs = '', cls = '') {
   return `<button class="die ${cls}${v ? '' : ' empty'}" data-v="${v}" ${attrs}>${'<i></i>'.repeat(9)}</button>`;
+}
+
+const MODES = [
+  ['virtual', 'Roll in app', 'Roll up to 3 times per turn, tap dice to hold them.'],
+  ['real', 'Real dice', 'Roll your own dice and tap in the five faces. The app scores them.'],
+  ['score', 'Enter scores', 'Roll your own dice, then tap a field and the points you got.'],
+];
+
+function saveNote() {
+  const txt = cloud.on
+    ? (cloud.err ? 'Could not save to your Claude account just now. Progress is kept on this device and syncs on your next move.' : 'Saved to your Claude account. Come back anytime, on any device.')
+    : 'Saved on this device. Close the app anytime and pick up where you left off.';
+  return `<p class="muted small save-note">${txt}</p>`;
 }
 
 function viewSetup() {
@@ -366,15 +412,15 @@ function viewSetup() {
         </div>
       </div>
       <div class="setting" style="display:block">
-        <div style="margin-bottom:8px">Dice</div>
-        <div class="seg">
-          <button class="${s.realDice ? '' : 'on'}" data-a="diceMode" data-v="virtual">Roll in app</button>
-          <button class="${s.realDice ? 'on' : ''}" data-a="diceMode" data-v="real">Real dice</button>
+        <div style="margin-bottom:8px">How you play</div>
+        <div class="seg seg3">
+          ${MODES.map(([v, label]) => `<button class="${s.mode === v ? 'on' : ''}" data-a="diceMode" data-v="${v}">${label}</button>`).join('')}
         </div>
-        <p class="muted small" style="margin:8px 0 0">${s.realDice ? 'Roll your own dice and tap in what you got — the app scores it.' : 'Roll up to 3 times per turn, tap dice to hold them.'}</p>
+        <p class="muted small" style="margin:8px 0 0">${MODES.find(([v]) => v === s.mode)[2]}</p>
       </div>
     </div>
     <button class="btn primary block" data-a="start">Start ${s.games} game${s.games > 1 ? 's' : ''}</button>
+    ${saveNote()}
   </main>`;
 }
 
@@ -393,6 +439,7 @@ function viewGame() {
     const sc = g.scores[p];
     if (filled(sc, cat.id)) return `<td class="${p === m.cur ? 'cur' : ''}${sc[cat.id] === 0 ? ' scratched' : ''}">${sc[cat.id] === 0 ? '–' : sc[cat.id]}</td>`;
     if (p !== m.cur) return '<td></td>';
+    if (m.mode === 'score') return `<td class="cur"><button class="cell-btn entry ${ui.sel === cat.id ? 'sel' : ''}" data-a="pick" data-cat="${cat.id}" aria-label="Enter ${cat.label}">${ui.sel === cat.id ? '?' : '+'}</button></td>`;
     if (!ready) return `<td class="cur"></td>`;
     const v = scoreFor(cat.id, m.dice);
     const cls = ui.sel === cat.id ? 'sel' : v === 0 ? 'zero' : (cat.face ? v >= 3 * cat.face : true) ? 'good' : '';
@@ -411,7 +458,18 @@ function viewGame() {
   const scoreLabel = selCat ? `Score ${selPts} · ${selCat.label}` : 'Pick a field';
 
   let tray;
-  if (m.realDice) {
+  if (m.mode === 'score') {
+    if (!selCat) {
+      tray = `<div class="hint-line">Tap a <b>+</b> in ${esc(m.players[m.cur])}'s column, then enter the points</div>`;
+    } else {
+      const opts = scoreOptions(selCat.id);
+      const few = opts.length <= 6;
+      tray = `
+        <div class="hint-line"><b>${selCat.label}</b> · ${selCat.hint}</div>
+        <div class="pts ${few ? 'few' : ''}">${opts.map((v) => `<button class="btn pt ${v === 0 ? 'zero' : ''}" data-a="enter" data-v="${v}">${v === 0 ? (few && !selCat.face ? 'Cross out' : '0') : v}${selCat.face && v ? `<small>${v / selCat.face}×</small>` : ''}</button>`).join('')}</div>
+        <button class="btn ghost" data-a="pick" data-cat="${selCat.id}">Cancel</button>`;
+    }
+  } else if (m.mode === 'real') {
     tray = `
       <div class="dice">${m.dice.map((v, i) => die(v, `data-a="die" data-i="${i}" aria-label="${v ? `Die showing ${v}, tap to clear` : 'Empty'}"`)).join('')}</div>
       <div class="faces">${[1, 2, 3, 4, 5, 6].map((v) => die(v, `data-a="face" data-v="${v}" aria-label="Add ${v}" ${ready ? 'disabled' : ''}`)).join('')}</div>
@@ -648,6 +706,74 @@ async function keepAwake() {
 function releaseAwake() { try { wakeLock && wakeLock.release(); } catch { /* ignore */ } wakeLock = null; }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.match && S.view === 'game') keepAwake(); });
 
+/* ---------- Cloud save (when hosted as a claude.ai artifact) ---------- */
+
+// The page keeps working on localStorage alone; when the viewer offers a per-user
+// database, state and history are mirrored there so they survive across devices and visits.
+const cloud = { on: false, state: null, hist: null, busy: false, dirty: false, timer: 0, err: null, lastState: '', lastHist: '' };
+
+function scheduleCloud() {
+  if (!cloud.on) return;
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(pushCloud, 400);
+}
+
+async function pushCloud() {
+  if (!cloud.on) return;
+  if (cloud.busy) { cloud.dirty = true; return; }
+  cloud.busy = true;
+  const hadErr = cloud.err;
+  try {
+    do {
+      cloud.dirty = false;
+      const hj = JSON.stringify(H), sj = JSON.stringify(S);
+      if (hj !== cloud.lastHist) { await cloud.hist.set({ json: hj, savedAt: S.savedAt || 0 }); cloud.lastHist = hj; }
+      if (sj !== cloud.lastState) { await cloud.state.set({ json: sj, savedAt: S.savedAt || 0 }); cloud.lastState = sj; }
+    } while (cloud.dirty);
+    cloud.err = null;
+  } catch (e) {
+    cloud.err = (e && e.code) || 'error';
+  }
+  cloud.busy = false;
+  if (!!hadErr !== !!cloud.err && S.view === 'setup') render();
+}
+
+async function initCloud() {
+  const c = window.claude;
+  if (!c || typeof c.use !== 'function') return;
+  try {
+    const [db, user] = await Promise.all([c.use('db'), c.use('user')]);
+    if (!db || !user) return;
+    const uid = await user.id();
+    if (!uid) return;
+    const mine = db.collection(`data/users/${uid}`);
+    const stRef = mine.doc('state'), hRef = mine.doc('history');
+    let timer;
+    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), 10000); });
+    const [st, hs] = await Promise.race([Promise.all([stRef.get(), hRef.get()]), timeout]);
+    clearTimeout(timer);
+    const remote = st.exists ? st.data() : null;
+    if (remote && (remote.savedAt || 0) > (S.savedAt || 0)) {
+      // The account copy is newer (played on another device or after clearing this browser).
+      S = JSON.parse(remote.json);
+      H = hs.exists ? JSON.parse(hs.data().json) : H;
+      migrate();
+      ui = { sel: null, rolling: [], dialog: null };
+      cloud.lastState = remote.json;
+      cloud.lastHist = hs.exists ? hs.data().json : '';
+      saveLocal();
+    } else if (remote) {
+      cloud.lastState = remote.json;
+      cloud.lastHist = hs.exists ? hs.data().json : '';
+    }
+    cloud.state = stRef;
+    cloud.hist = hRef;
+    cloud.on = true;
+    if (!remote || (S.savedAt || 0) > (remote.savedAt || 0)) pushCloud();
+    render();
+  } catch { /* no account storage in this view: keep local only */ }
+}
+
 /* ---------- Wiring ---------- */
 
 document.addEventListener('click', (e) => {
@@ -668,6 +794,7 @@ document.addEventListener('input', (e) => {
 });
 
 render();
+initCloud();
 if (S.match && S.view === 'game') keepAwake();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {

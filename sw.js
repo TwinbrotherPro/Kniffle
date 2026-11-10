@@ -1,5 +1,5 @@
 // Bump VERSION whenever app files change so installed clients pick up the update.
-const VERSION = 'kniffle-v2';
+const VERSION = 'kniffle-v3';
 const ASSETS = [
   './',
   './index.html',

@@ -132,6 +132,7 @@ main { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px;
 .stepper { display: flex; align-items: center; gap: 12px; }
 .stepper output { min-width: 40px; text-align: center; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--surface-2); border-radius: 12px; padding: 4px; gap: 4px; }
+.seg.seg3 { grid-template-columns: repeat(3, 1fr); }
 .seg button { border: 0; background: transparent; border-radius: 9px; min-height: 40px; font-weight: 600; cursor: pointer; }
 .seg button.on { background: var(--surface); box-shadow: var(--shadow); }
 .setting { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; }
@@ -262,3 +263,13 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .btn.danger-solid { background: var(--danger); color: #fff; }
 .btn:focus-visible, .icon-btn:focus-visible, .cell-btn:focus-visible, .die:focus-visible, .seg button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .die.rolling, .toast { animation: none; } .die { transition: none; } }
+
+/* Score-entry mode */
+.cell-btn.entry { color: var(--accent); font-weight: 700; opacity: .7; }
+.cell-btn.entry.sel { opacity: 1; }
+.pts { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.pts.few { grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); }
+.pts .pt { min-height: 44px; padding: 0 4px; flex-direction: column; gap: 0; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.pts .pt small { font-size: 11px; font-weight: 500; color: var(--muted); }
+.pts .pt.zero { color: var(--danger); }
+.save-note { text-align: center; margin: 0; }
