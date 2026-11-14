@@ -20,6 +20,7 @@ const CATS = [
 const UPPER = CATS.slice(0, 6);
 const LOWER = CATS.slice(6);
 const BONUS_AT = 63, BONUS = 35;
+const KNIFFEL_BONUS = 50; // each extra Kniffel once the Kniffel field holds 50
 const MAX_PLAYERS = 8, MAX_GAMES = 20;
 const COLORS = ['#e0614a', '#3b82c4', '#d9a21b', '#8a5cc7', '#2fa37a', '#d65a9a', '#5a6b78', '#e08a2e'];
 
@@ -53,7 +54,8 @@ function totals(sc) {
   // "par" = three of each face for the upper fields already filled; >= 0 means on track for the bonus
   const par = UPPER.reduce((a, c) => a + (filled(sc, c.id) ? (sc[c.id] - 3 * c.face) : 0), 0);
   const count = CATS.filter((c) => filled(sc, c.id)).length;
-  return { up, bonus, upTotal: up + bonus, low, total: up + bonus + low, par, count, done: count === CATS.length };
+  const kb = (sc.kb || 0) * KNIFFEL_BONUS;
+  return { up, bonus, upTotal: up + bonus, low, kb, total: up + bonus + low + kb, par, count, done: count === CATS.length };
 }
 
 /* ---------- State ---------- */
@@ -87,10 +89,22 @@ let S = load(STORE, null) || {
 let ui = { sel: null, rolling: [], dialog: null }; // transient, not persisted
 
 // Input modes: 'virtual' (roll in app), 'real' (tap in real dice), 'score' (type points per turn).
+// Brings saved data from older versions up to the current shape. Safe to run repeatedly.
+const SCHEMA = 2;
 function migrate() {
+  // v1 -> v2: dice mode flag became a mode string
   for (const o of [S.setup, S.match]) {
     if (o && !o.mode) { o.mode = o.realDice ? 'real' : 'virtual'; delete o.realDice; }
   }
+  // v1 -> v2: Kniffel bonus (sc.kb = number of extra Kniffels; absent means 0)
+  if (S.match) {
+    for (const g of S.match.games) {
+      if (!g.kniffels) g.kniffels = S.match.players.map(() => 0);
+      if (g.result && !g.result.kb) g.result.kb = g.scores.map((sc) => sc.kb || 0);
+    }
+  }
+  for (const sum of H) for (const g of sum.games) if (!g.kb) g.kb = g.totals.map(() => 0);
+  S.schema = SCHEMA;
 }
 migrate();
 
@@ -254,6 +268,17 @@ const actions = {
     if (!ui.sel || !scoreOptions(ui.sel).includes(pts)) return false;
     return commit(ui.sel, pts, ui.sel === 'kniffel' && pts === 50);
   },
+  kbonus({ p }) {
+    const m = S.match, g = curGame(), i = +p, sc = g.scores[i];
+    if (sc.kniffel !== 50) return false;
+    ask(`Add a ${KNIFFEL_BONUS}-point Kniffel bonus for ${m.players[i]}? Use this for every extra Kniffel after the Kniffel field is filled with 50. You still score the roll in another field.`,
+      `Add +${KNIFFEL_BONUS}`, () => {
+        m.undo = JSON.stringify({ ...m, undo: null });
+        sc.kb = (sc.kb || 0) + 1;
+        // In score-entry mode the app never saw the dice, so count the Kniffel here.
+        if (m.mode === 'score') g.kniffels[i]++;
+      });
+  },
   undo() {
     const m = S.match;
     if (!m || !m.undo) return false;
@@ -294,6 +319,10 @@ function commit(cat, pts, kniffelRolled) {
   const sc = g.scores[m.cur];
   if (filled(sc, cat)) return false;
   m.undo = JSON.stringify({ ...m, undo: null });
+  if (kniffelRolled && cat !== 'kniffel' && sc.kniffel === 50) {
+    sc.kb = (sc.kb || 0) + 1;
+    toast(`Kniffel bonus +${KNIFFEL_BONUS}!`);
+  }
   sc[cat] = pts;
   if (kniffelRolled) g.kniffels[m.cur]++;
   ui.sel = null;
@@ -305,6 +334,7 @@ function commit(cat, pts, kniffelRolled) {
       up: ts.map((t) => t.up),
       bonus: ts.map((t) => t.bonus > 0),
       kniffels: g.kniffels.slice(),
+      kb: g.scores.map((sc) => sc.kb || 0),
     };
     S.view = 'gameover';
   } else {
@@ -509,6 +539,11 @@ function viewGame() {
           ${sumRow(`Upper <span class="hint">Bonus ${BONUS} at ${BONUS_AT}+</span>`, (t) => `${t.up}${parTxt(t)}`)}
           ${sumRow('Bonus', (t) => (t.bonus ? `+${t.bonus}` : '–'))}
           ${LOWER.map(row).join('')}
+          <tr class="kb-row"><th class="cat">Kniffel bonus<span class="hint">+${KNIFFEL_BONUS} per extra Kniffel</span></th>${g.scores.map((sc, p) => {
+            const cur = p === m.cur ? 'cur' : '';
+            if (sc.kniffel !== 50) return `<td class="${cur}">${sc.kb ? `+${sc.kb * KNIFFEL_BONUS}` : ''}</td>`;
+            return `<td class="${cur}"><button class="cell-btn kb ${sc.kb ? 'has' : ''}" data-a="kbonus" data-p="${p}" aria-label="Add Kniffel bonus for ${esc(m.players[p])}">${sc.kb ? `+${sc.kb * KNIFFEL_BONUS}` : '+'}</button></td>`;
+          }).join('')}</tr>
           ${sumRow('Total', (t) => t.total, 'sum total')}
         </tbody>
       </table>
